@@ -4,13 +4,12 @@ import pathlib as pl
 from typing import Any, Optional
 from fastmcp import FastMCP
 from . import graph, auth
-import httpx
 
 # Color mapping for natural language color names to Outlook preset codes
 COLOR_MAPPING = {
     # Standard colors
     "red": "preset0",
-    "orange": "preset1", 
+    "orange": "preset1",
     "brown": "preset2",
     "yellow": "preset3",
     "green": "preset4",
@@ -24,7 +23,6 @@ COLOR_MAPPING = {
     "gray": "preset12",
     "darkgray": "preset13",
     "black": "preset14",
-    
     # Dark variants
     "darkred": "preset15",
     "darkorange": "preset16",
@@ -36,7 +34,6 @@ COLOR_MAPPING = {
     "darkblue": "preset22",
     "darkpurple": "preset23",
     "darkcranberry": "preset24",
-    
     # Aliases with spaces
     "dark red": "preset15",
     "dark orange": "preset16",
@@ -524,9 +521,9 @@ def list_events(
     include_details: bool = True,
 ) -> list[dict[str, Any]]:
     """List calendar events within specified date range, including recurring event instances.
-    
+
     Returns event details including categories (array of strings matching user's outlook categories).
-    Use list_outlook_categories to see available categories, or create_outlook_category 
+    Use list_outlook_categories to see available categories, or create_outlook_category
     to create new ones with colors like 'red', 'blue', 'green', etc."""
     now = dt.datetime.now(dt.timezone.utc)
     start = (now - dt.timedelta(days=days_back)).isoformat()
@@ -544,12 +541,105 @@ def list_events(
             "id,subject,start,end,location,body,attendees,organizer,isAllDay,recurrence,onlineMeeting,seriesMasterId,categories"
         )
     else:
-        params["$select"] = "id,subject,start,end,location,organizer,seriesMasterId,categories"
+        params["$select"] = (
+            "id,subject,start,end,location,organizer,seriesMasterId,categories"
+        )
 
     # Use calendarView to get recurring event instances
     events = list(
         graph.request_paginated("/me/calendarView", account_id, params=params)
     )
+
+    return events
+
+
+@mcp.tool
+def list_events_by_date_range(
+    account_id: str,
+    start_date: str,
+    end_date: str,
+    category_filter: Optional[str] = None,
+    exclude_categories: bool = False,
+    include_details: bool = True,
+) -> list[dict[str, Any]]:
+    """List calendar events within a specific date range with optional category filtering.
+
+    Args:
+        account_id: The account ID to query
+        start_date: Start date in ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
+        end_date: End date in ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
+        category_filter: Only return events with this specific category
+        exclude_categories: If True, only return events with no categories
+        include_details: Include full event details vs summary only
+
+    Returns event details including categories. For events with specific categories,
+    use category_filter. For events without any categories, use exclude_categories=True.
+    """
+
+    # Parse and validate dates
+    def parse_date_string(date_str: str) -> str:
+        """Parse date string and return ISO format with timezone"""
+        try:
+            # Try parsing as full datetime first
+            if "T" in date_str:
+                parsed = dt.datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            else:
+                # Parse as date only and add time
+                parsed = dt.datetime.fromisoformat(date_str + "T00:00:00")
+
+            # Ensure timezone aware
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=dt.timezone.utc)
+
+            return parsed.isoformat()
+        except ValueError as e:
+            raise ValueError(
+                f"Invalid date format '{date_str}'. Use YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"
+            ) from e
+
+    start_datetime = parse_date_string(start_date)
+    end_datetime = parse_date_string(end_date)
+
+    # For date-only inputs, adjust end date to include the full end day
+    if "T" not in end_date:
+        end_parsed = dt.datetime.fromisoformat(end_datetime.replace("Z", "+00:00"))
+        end_parsed = end_parsed.replace(hour=23, minute=59, second=59)
+        end_datetime = end_parsed.isoformat()
+
+    # Validate date range
+    start_parsed = dt.datetime.fromisoformat(start_datetime.replace("Z", "+00:00"))
+    end_parsed = dt.datetime.fromisoformat(end_datetime.replace("Z", "+00:00"))
+    if start_parsed >= end_parsed:
+        raise ValueError("start_date must be before end_date")
+
+    params = {
+        "startDateTime": start_datetime,
+        "endDateTime": end_datetime,
+        "$orderby": "start/dateTime",
+        "$top": 100,
+    }
+
+    # Add category filter to OData query if specified
+    if category_filter and not exclude_categories:
+        params["$filter"] = f"categories/any(x:x eq '{category_filter}')"
+
+    if include_details:
+        params["$select"] = (
+            "id,subject,start,end,location,body,attendees,organizer,isAllDay,recurrence,onlineMeeting,seriesMasterId,categories"
+        )
+    else:
+        params["$select"] = (
+            "id,subject,start,end,location,organizer,seriesMasterId,categories"
+        )
+
+    # Use calendarView to get recurring event instances
+    events = list(
+        graph.request_paginated("/me/calendarView", account_id, params=params)
+    )
+
+    # Client-side filtering for events without categories (API limitation)
+    if exclude_categories:
+        events = [event for event in events if not event.get("categories")]
 
     return events
 
@@ -576,16 +666,15 @@ def create_event(
     categories: str | list[str] | None = None,
 ) -> dict[str, Any]:
     """Create a calendar event with optional categories.
-    
+
     Categories must be strings that match existing outlook categories for the user.
-    Use list_outlook_categories to see available categories, or create_outlook_category 
+    Use list_outlook_categories to see available categories, or create_outlook_category
     to create new ones with natural language colors like 'red', 'blue', 'green', etc.
-    
+
     Multiple categories are fully supported using an optimized create-then-update approach
     that ensures reliable event creation. Single categories use direct creation when possible.
     Events will always be created successfully, with detailed status in the response."""
-    
-    
+
     event = {
         "subject": subject,
         "start": {"dateTime": start, "timeZone": timezone},
@@ -606,7 +695,7 @@ def create_event(
 
     if categories:
         categories_list = [categories] if isinstance(categories, str) else categories
-        
+
         # Proactive fallback strategy for multiple categories to avoid MCP layer issues
         if len(categories_list) > 1:
             # Use the proven fallback approach for multiple categories
@@ -614,21 +703,28 @@ def create_event(
                 # Step 1: Create event with first category only
                 event["categories"] = [categories_list[0]]
                 result = graph.request("POST", "/me/events", account_id, json=event)
-                
+
                 if result and "id" in result:
                     event_id = result["id"]
-                    
+
                     # Step 2: Update with all categories
                     update_data = {"categories": categories_list}
                     try:
-                        graph.request("PATCH", f"/me/events/{event_id}", account_id, json=update_data)
+                        graph.request(
+                            "PATCH",
+                            f"/me/events/{event_id}",
+                            account_id,
+                            json=update_data,
+                        )
                         result["categories"] = categories_list
                         result["_multiple_categories_method"] = "create_then_update"
                         return result
                     except Exception as update_error:
                         # Event created but update failed - still return success with warning
                         result["categories"] = [categories_list[0]]
-                        result["_category_warning"] = f"Event created with first category only. Update failed: {str(update_error)}"
+                        result["_category_warning"] = (
+                            f"Event created with first category only. Update failed: {str(update_error)}"
+                        )
                         return result
                 else:
                     # First step failed, try without categories
@@ -636,54 +732,73 @@ def create_event(
                     result = graph.request("POST", "/me/events", account_id, json=event)
                     if result:
                         result["categories"] = []
-                        result["_category_warning"] = f"Event created without categories. Original categories: {categories_list}"
+                        result["_category_warning"] = (
+                            f"Event created without categories. Original categories: {categories_list}"
+                        )
                         return result
                     else:
-                        raise ValueError("Failed to create event even without categories")
-                        
+                        raise ValueError(
+                            "Failed to create event even without categories"
+                        )
+
             except Exception as e:
                 # Comprehensive error handling - catch any exception
-                raise ValueError(f"Failed to create event with multiple categories using fallback method. Error: {str(e)}")
-        
+                raise ValueError(
+                    f"Failed to create event with multiple categories using fallback method. Error: {str(e)}"
+                )
+
         else:
             # Single category - use direct approach with fallback
             event["categories"] = categories_list
-            
+
             try:
                 result = graph.request("POST", "/me/events", account_id, json=event)
                 if result:
                     return result
                 else:
                     # API returned None - try fallback
-                    del event["categories"] 
+                    del event["categories"]
                     result = graph.request("POST", "/me/events", account_id, json=event)
                     if result:
                         # Try to add category via update
                         try:
                             event_id = result["id"]
                             update_data = {"categories": categories_list}
-                            graph.request("PATCH", f"/me/events/{event_id}", account_id, json=update_data)
+                            graph.request(
+                                "PATCH",
+                                f"/me/events/{event_id}",
+                                account_id,
+                                json=update_data,
+                            )
                             result["categories"] = categories_list
-                        except:
+                        except Exception:
                             result["categories"] = []
-                            result["_category_warning"] = f"Event created but couldn't add category: {categories_list[0]}"
+                            result["_category_warning"] = (
+                                f"Event created but couldn't add category: {categories_list[0]}"
+                            )
                         return result
                     else:
                         raise ValueError("Failed to create event")
-                        
+
             except Exception as e:
-                # Single category failed - try without categories  
+                # Single category failed - try without categories
                 try:
                     del event["categories"]
                     result = graph.request("POST", "/me/events", account_id, json=event)
                     if result:
                         result["categories"] = []
-                        result["_category_warning"] = f"Event created without categories due to error: {str(e)}"
+                        result["_category_warning"] = (
+                            f"Event created without categories due to error: {str(e)}"
+                        )
                         return result
                     else:
-                        raise ValueError(f"Failed to create event. Original error: {str(e)}")
+                        raise ValueError(
+                            f"Failed to create event. Original error: {str(e)}"
+                        )
                 except Exception as final_error:
-                    raise ValueError(f"Failed to create event. Original error: {str(e)}. Final error: {str(final_error)}")
+                    raise ValueError(
+                        f"Failed to create event. Original error: {str(e)}. Final error: {str(final_error)}"
+                    )
 
     # Original path for events without categories
     result = graph.request("POST", "/me/events", account_id, json=event)
@@ -697,10 +812,10 @@ def update_event(
     event_id: str, updates: dict[str, Any], account_id: str
 ) -> dict[str, Any]:
     """Update event properties including categories.
-    
+
     Categories should be provided as a list of strings in the updates dict.
     Categories must match existing outlook categories for the user.
-    Use list_outlook_categories to see available categories, or create_outlook_category 
+    Use list_outlook_categories to see available categories, or create_outlook_category
     to create new ones with colors like 'red', 'blue', 'green', etc."""
     formatted_updates = {}
 
@@ -1124,10 +1239,10 @@ def unified_search(
 @mcp.tool
 def list_outlook_categories(account_id: str) -> list[dict[str, Any]]:
     """List all outlook categories defined for the user.
-    
+
     Returns categories with their displayName (used for event categories), color properties, and id.
     These are the categories that can be assigned to events, emails, and other items.
-    
+
     The returned id field is needed for update_outlook_category_color() and delete_outlook_category() operations.
     Use get_outlook_category_by_name() to find a category by display name when you only know the name."""
     categories = list(
@@ -1138,69 +1253,85 @@ def list_outlook_categories(account_id: str) -> list[dict[str, Any]]:
 
 @mcp.tool
 def create_outlook_category(
-    account_id: str, 
-    display_name: str, 
-    color: str = "blue"
+    account_id: str, display_name: str, color: str = "blue"
 ) -> dict[str, Any]:
     """Create a new outlook category that can be used for events, emails, and other items.
-    
+
     IMPORTANT: Once created, category names cannot be changed. Only the color can be updated.
     To change a category name, you must delete the old category and create a new one.
-    
+
     Args:
         display_name: The name of the category (must be unique for the user, cannot be changed later)
-        color: Color name like 'red', 'blue', 'green', 'yellow', 'orange', 'purple', 
+        color: Color name like 'red', 'blue', 'green', 'yellow', 'orange', 'purple',
                'cranberry', 'teal', 'olive', 'brown', 'steel', 'gray', 'black'.
                Add 'dark' prefix for darker variants (e.g. 'dark blue', 'dark green').
-        
+
     Use this before assigning categories to events if the category doesn't exist yet.
     Use update_outlook_category_color() to change the color of existing categories."""
-    
+
     # Convert natural language color to preset code
     color_lower = color.lower().strip()
-    
+
     # Debug: Check if COLOR_MAPPING is available
     if not COLOR_MAPPING:
         raise ValueError("Color mapping not initialized. Please report this bug.")
-    
+
     if color_lower in COLOR_MAPPING:
         preset_color = COLOR_MAPPING[color_lower]
     else:
         # If color not found, suggest available colors
         available_colors = sorted(set(COLOR_MAPPING.keys()))
-        close_matches = [c for c in available_colors if color_lower in c or c in color_lower]
+        close_matches = [
+            c for c in available_colors if color_lower in c or c in color_lower
+        ]
         if close_matches:
-            raise ValueError(f"Unknown color '{color}'. Did you mean: {', '.join(close_matches)}? All available colors: {', '.join(available_colors)}")
+            raise ValueError(
+                f"Unknown color '{color}'. Did you mean: {', '.join(close_matches)}? All available colors: {', '.join(available_colors)}"
+            )
         else:
-            raise ValueError(f"Unknown color '{color}'. Available colors: {', '.join(available_colors)}")
-    
-    category_data = {
-        "displayName": display_name,
-        "color": preset_color
-    }
-    
+            raise ValueError(
+                f"Unknown color '{color}'. Available colors: {', '.join(available_colors)}"
+            )
+
+    category_data = {"displayName": display_name, "color": preset_color}
+
     try:
-        result = graph.request("POST", "/me/outlook/masterCategories", account_id, json=category_data)
+        result = graph.request(
+            "POST", "/me/outlook/masterCategories", account_id, json=category_data
+        )
         if not result:
-            raise ValueError(f"Failed to create category '{display_name}' - no response from server")
+            raise ValueError(
+                f"Failed to create category '{display_name}' - no response from server"
+            )
         return result
     except Exception as e:
         error_msg = str(e)
         # Enhanced error handling for API issues
         if "400" in error_msg:
             # Check if it's a duplicate category error
-            if "already exists" in error_msg.lower() or "duplicate" in error_msg.lower():
-                raise ValueError(f"Category '{display_name}' already exists. Please choose a different name or use the existing category.")
+            if (
+                "already exists" in error_msg.lower()
+                or "duplicate" in error_msg.lower()
+            ):
+                raise ValueError(
+                    f"Category '{display_name}' already exists. Please choose a different name or use the existing category."
+                )
             # Check if it's a color-related error
             elif "color" in error_msg.lower() or "preset" in error_msg.lower():
                 available_colors = sorted(set(COLOR_MAPPING.keys()))
-                raise ValueError(f"Invalid color preset '{preset_color}' for color '{color}'. Available colors: {', '.join(available_colors)}. Error: {error_msg}")
+                raise ValueError(
+                    f"Invalid color preset '{preset_color}' for color '{color}'. Available colors: {', '.join(available_colors)}. Error: {error_msg}"
+                )
             # General 400 error with detailed context
             else:
                 available_colors = sorted(set(COLOR_MAPPING.keys()))
-                raise ValueError(f"Failed to create category '{display_name}' with color '{color}' (preset: {preset_color}). Available colors: {', '.join(available_colors)}. Server error: {error_msg}")
+                raise ValueError(
+                    f"Failed to create category '{display_name}' with color '{color}' (preset: {preset_color}). Available colors: {', '.join(available_colors)}. Server error: {error_msg}"
+                )
         elif "401" in error_msg or "403" in error_msg:
-            raise ValueError(f"Authentication error: Please ensure you're properly authenticated. Error: {error_msg}")
+            raise ValueError(
+                f"Authentication error: Please ensure you're properly authenticated. Error: {error_msg}"
+            )
         else:
             raise ValueError(f"Failed to create category '{display_name}': {error_msg}")
 
@@ -1208,16 +1339,16 @@ def create_outlook_category(
 @mcp.tool
 def list_available_colors() -> dict[str, str]:
     """List all available colors for outlook categories.
-    
+
     Returns a mapping of color names to their descriptions, useful for creating
     categories with natural language color names.
-    
+
     [VERSION: 2025-01-09-FIXED] - Includes parameter validation fixes"""
-    
+
     # Create a clean mapping with descriptions
     color_descriptions = {
         "red": "Bright red",
-        "orange": "Bright orange", 
+        "orange": "Bright orange",
         "brown": "Brown",
         "yellow": "Bright yellow",
         "green": "Bright green",
@@ -1238,69 +1369,88 @@ def list_available_colors() -> dict[str, str]:
         "dark olive": "Dark olive",
         "dark blue": "Dark blue",
         "dark purple": "Dark purple",
-        "dark cranberry": "Dark cranberry"
+        "dark cranberry": "Dark cranberry",
     }
-    
+
     return color_descriptions
 
 
 @mcp.tool
-def update_outlook_category_color(account_id: str, category_id: str, color: str) -> dict[str, Any]:
+def update_outlook_category_color(
+    account_id: str, category_id: str, color: str
+) -> dict[str, Any]:
     """Update the color of an existing outlook category.
-    
+
     IMPORTANT: Only the color property can be updated for existing categories.
     To change a category name, you must delete the old category and create a new one.
-    
+
     Args:
         account_id: The account ID to use for authentication
         category_id: The ID of the category to update (get from list_outlook_categories)
-        color: Color name like 'red', 'blue', 'green', 'yellow', 'orange', 'purple', 
-               'teal', 'olive', 'brown', 'cranberry', 'steel', 'gray', 'black', 
+        color: Color name like 'red', 'blue', 'green', 'yellow', 'orange', 'purple',
+               'teal', 'olive', 'brown', 'cranberry', 'steel', 'gray', 'black',
                or dark variants like 'dark red', 'dark blue', etc.
-    
+
     Returns:
         Updated category object with id, displayName, and color
-    
+
     Use this when you need to change the color of an existing category.
     Use get_outlook_category_by_name() to find category ID when you only know the display name."""
-    
+
     # Convert natural language color to preset code
     color_lower = color.lower().strip()
-    
+
     # Validate color exists in our mapping
     if color_lower not in COLOR_MAPPING:
         available_colors = sorted(set(COLOR_MAPPING.keys()))
-        close_matches = [c for c in available_colors if color_lower in c or c in color_lower]
+        close_matches = [
+            c for c in available_colors if color_lower in c or c in color_lower
+        ]
         if close_matches:
-            raise ValueError(f"Unknown color '{color}'. Did you mean: {', '.join(close_matches)}? All available colors: {', '.join(available_colors)}")
+            raise ValueError(
+                f"Unknown color '{color}'. Did you mean: {', '.join(close_matches)}? All available colors: {', '.join(available_colors)}"
+            )
         else:
-            raise ValueError(f"Unknown color '{color}'. Available colors: {', '.join(available_colors)}")
-    
+            raise ValueError(
+                f"Unknown color '{color}'. Available colors: {', '.join(available_colors)}"
+            )
+
     preset_color = COLOR_MAPPING[color_lower]
-    
+
     # Prepare update data
-    update_data = {
-        "color": preset_color
-    }
-    
+    update_data = {"color": preset_color}
+
     try:
-        result = graph.request("PATCH", f"/me/outlook/masterCategories/{category_id}", account_id, json=update_data)
+        result = graph.request(
+            "PATCH",
+            f"/me/outlook/masterCategories/{category_id}",
+            account_id,
+            json=update_data,
+        )
         if not result:
-            raise ValueError(f"Failed to update category color - no response from server")
-        
+            raise ValueError(
+                "Failed to update category color - no response from server"
+            )
+
         return result
-        
+
     except Exception as e:
         error_msg = str(e).lower()
-        
+
         # Check for specific error types and provide helpful messages
         if "404" in error_msg or "not found" in error_msg:
-            raise ValueError(f"Category with ID '{category_id}' not found. Use list_outlook_categories() to see available categories.")
+            raise ValueError(
+                f"Category with ID '{category_id}' not found. Use list_outlook_categories() to see available categories."
+            )
         elif "403" in error_msg or "forbidden" in error_msg:
-            raise ValueError(f"Permission denied. Make sure you have MailboxSettings.ReadWrite permission to update categories.")
+            raise ValueError(
+                "Permission denied. Make sure you have MailboxSettings.ReadWrite permission to update categories."
+            )
         elif "400" in error_msg or "bad request" in error_msg:
             available_colors = sorted(set(COLOR_MAPPING.keys()))
-            raise ValueError(f"Invalid color preset '{preset_color}' for color '{color}'. Available colors: {', '.join(available_colors)}. Error: {error_msg}")
+            raise ValueError(
+                f"Invalid color preset '{preset_color}' for color '{color}'. Available colors: {', '.join(available_colors)}. Error: {error_msg}"
+            )
         else:
             raise ValueError(f"Failed to update category color: {str(e)}")
 
@@ -1308,71 +1458,79 @@ def update_outlook_category_color(account_id: str, category_id: str, color: str)
 @mcp.tool
 def delete_outlook_category(account_id: str, category_id: str) -> dict[str, str]:
     """Delete an outlook category.
-    
-    IMPORTANT: Deleting a category will not remove it from existing messages - 
-    it will appear grayed out in those messages. You'll need to manually remove 
+
+    IMPORTANT: Deleting a category will not remove it from existing messages -
+    it will appear grayed out in those messages. You'll need to manually remove
     categories from individual messages if desired.
-    
+
     Args:
         account_id: The account ID to use for authentication
         category_id: The ID of the category to delete (get from list_outlook_categories)
-    
+
     Returns:
         Success confirmation message
-    
+
     Use get_outlook_category_by_name() to find category ID when you only know the display name."""
-    
+
     try:
         # DELETE request returns 204 No Content on success (no response body)
-        graph.request("DELETE", f"/me/outlook/masterCategories/{category_id}", account_id)
-        
+        graph.request(
+            "DELETE", f"/me/outlook/masterCategories/{category_id}", account_id
+        )
+
         return {
             "message": f"Category '{category_id}' deleted successfully",
-            "warning": "This category will still appear grayed out in existing messages. Remove manually from individual messages if needed."
+            "warning": "This category will still appear grayed out in existing messages. Remove manually from individual messages if needed.",
         }
-        
+
     except Exception as e:
         error_msg = str(e).lower()
-        
+
         # Check for specific error types and provide helpful messages
         if "404" in error_msg or "not found" in error_msg:
-            raise ValueError(f"Category with ID '{category_id}' not found. Use list_outlook_categories() to see available categories.")
+            raise ValueError(
+                f"Category with ID '{category_id}' not found. Use list_outlook_categories() to see available categories."
+            )
         elif "403" in error_msg or "forbidden" in error_msg:
-            raise ValueError(f"Permission denied. Make sure you have MailboxSettings.ReadWrite permission to delete categories.")
+            raise ValueError(
+                "Permission denied. Make sure you have MailboxSettings.ReadWrite permission to delete categories."
+            )
         else:
             raise ValueError(f"Failed to delete category: {str(e)}")
 
 
 @mcp.tool
-def get_outlook_category_by_name(account_id: str, display_name: str) -> dict[str, Any] | None:
+def get_outlook_category_by_name(
+    account_id: str, display_name: str
+) -> dict[str, Any] | None:
     """Find an outlook category by its display name.
-    
+
     This is a helper function to get the category ID when you only know the display name.
     Use the returned ID with update_outlook_category_color() or delete_outlook_category().
-    
+
     Args:
         account_id: The account ID to use for authentication
         display_name: The display name of the category to find
-    
+
     Returns:
         Category object with id, displayName, and color if found, None otherwise
-    
+
     Example:
         category = get_outlook_category_by_name(account_id, "Personal")
         if category:
             update_outlook_category_color(account_id, category["id"], "red")
     """
-    
+
     try:
         categories = list_outlook_categories(account_id)
-        
+
         # Search for category by display name (case-insensitive)
         display_name_lower = display_name.lower().strip()
         for category in categories:
             if category["displayName"].lower() == display_name_lower:
                 return category
-        
+
         return None
-        
+
     except Exception as e:
         raise ValueError(f"Failed to search for category '{display_name}': {str(e)}")

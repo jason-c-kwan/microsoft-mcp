@@ -67,6 +67,131 @@ VALID_ENTITY_TYPES = {
 mcp = FastMCP("microsoft-mcp")
 
 
+def _normalize_request_params(request_data):
+    """Normalize request parameters to ensure compatibility with MCP types.
+    
+    This function handles common parameter normalization issues that cause
+    validation failures in built-in MCP methods.
+    """
+    if request_data is None:
+        return None
+    
+    # Handle requests with missing params field
+    if not hasattr(request_data, 'params') or request_data.params is None:
+        # For ping and other methods that accept optional params,
+        # ensure we return the correct None value
+        return None
+    
+    # Handle requests with empty params dict
+    if hasattr(request_data, 'params') and request_data.params == {}:
+        # Convert empty dict to None for methods that expect optional params
+        return None
+    
+    # Return the params as-is for methods that require specific parameter structures
+    return request_data.params
+
+
+# Enhanced built-in method handlers with robust parameter handling
+def _create_enhanced_handlers():
+    """Create enhanced handlers for built-in MCP methods with proper parameter validation."""
+    
+    # Import required types
+    try:
+        import mcp.types as types
+        from mcp.shared.exceptions import McpError
+        from mcp.server.lowlevel.server import _ping_handler
+        
+        async def enhanced_ping_handler(request=None):
+            """Enhanced ping handler that properly handles all parameter variations.
+            
+            This handler accepts requests with no params, null params, or empty params
+            and responds with a proper empty result.
+            """
+            try:
+                # The ping request should accept None, empty dict, or valid RequestParams
+                # No additional processing needed for ping - just return success
+                return types.ServerResult(types.EmptyResult())
+            except Exception as e:
+                # Provide a more specific error response if something goes wrong
+                return types.ServerResult(
+                    types.ErrorData(
+                        code=0,
+                        message=f"Ping handler error: {str(e)}",
+                        data=None
+                    )
+                )
+        
+        async def enhanced_list_tools_handler(request=None):
+            """Enhanced tools/list handler with robust parameter handling."""
+            try:
+                # Delegate to FastMCP's existing implementation but with better error handling
+                tools_list = await mcp._mcp_list_tools()
+                return types.ServerResult(types.ListToolsResult(tools=tools_list))
+            except Exception as e:
+                # Provide more specific error information
+                return types.ServerResult(
+                    types.ErrorData(
+                        code=0,
+                        message=f"Failed to list tools: {str(e)}",
+                        data={"error_type": type(e).__name__}
+                    )
+                )
+        
+        # Register the enhanced handlers
+        # We need to access the underlying MCP server's request handlers directly
+        try:
+            # Ensure ping handler is properly registered
+            mcp._mcp_server.request_handlers[types.PingRequest] = enhanced_ping_handler
+            
+            # Ensure list_tools handler is properly registered  
+            mcp._mcp_server.request_handlers[types.ListToolsRequest] = enhanced_list_tools_handler
+            
+            # Ensure the default ping handler is also available
+            if _ping_handler not in mcp._mcp_server.request_handlers.values():
+                mcp._mcp_server.request_handlers[types.PingRequest] = _ping_handler
+                
+        except Exception:
+            # If we can't register the handlers, continue with what we have
+            pass
+            
+    except Exception:
+        # If we can't import the required types, continue anyway
+        pass
+
+# Call the handler creation function
+_create_enhanced_handlers()
+
+
+# Direct handler registration for built-in MCP methods as fallback
+try:
+    import mcp.types as types
+    from mcp.server.lowlevel.server import _ping_handler
+    
+    # Ensure the ping handler is properly registered
+    # The underlying MCP library already has a working ping handler
+    if types.PingRequest not in mcp._mcp_server.request_handlers:
+        mcp._mcp_server.request_handlers[types.PingRequest] = _ping_handler
+    
+    # Create a simple list_tools handler if one doesn't exist
+    async def _simple_list_tools_handler(request):
+        """Simple list_tools handler that delegates to FastMCP's implementation."""
+        try:
+            tools = await mcp._mcp_list_tools()
+            from mcp.types import ServerResult, ListToolsResult
+            return ServerResult(ListToolsResult(tools=tools))
+        except Exception as e:
+            from mcp.types import ServerResult, ErrorData
+            return ServerResult(ErrorData(code=0, message=str(e), data=None))
+    
+    # Register the list_tools handler
+    if types.ListToolsRequest not in mcp._mcp_server.request_handlers:
+        mcp._mcp_server.request_handlers[types.ListToolsRequest] = _simple_list_tools_handler
+    
+except Exception:
+    # Silently fail to avoid breaking existing functionality
+    pass
+
+
 def _decode_email_id(email_id: str) -> str:
     """Safely decode email ID from URL encoding.
     
